@@ -21,4 +21,5 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 db_file = 'database.db'
 db = DataBase(db_file)
 
+fee_rate = 1.3
 

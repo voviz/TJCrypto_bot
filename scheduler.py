@@ -19,8 +19,9 @@ async def clear_orders():
                                                                  '%Y-%m-%d %H:%M:%S')).total_seconds() >= 900:
             client_id = db.get_client_id(unique_id)
 
+            db.increase_card_limit(db.get_chosen_card_id(client_id), db.get_sum_to_pay(client_id))
             db.expire_order(unique_id)
-            await bot.send_message(client_id, text=f'Ваш заказ {unique_id} удален, потому что он не оплачен.\n\nПосле '
+            await bot.send_message(client_id, text=f'Ваш заказ №{unique_id} удален, потому что он не оплачен.\n\nПосле '
                                                    f'удаления заказа реквезиты недействительны!')
             await bot.delete_message(client_id, db.get_user_message_order(unique_id))
             await bot.delete_message(client_id, db.get_user_message_card(unique_id))

@@ -2,6 +2,7 @@ from aiogram import types
 from aiogram.dispatcher import FSMContext
 
 from load_all import dp, bot, db
+from load_all import fee_rate
 from states import TradeRequest
 from config import ADMIN_IDS
 
@@ -36,6 +37,7 @@ async def handle_start(message: types.Message):
                     message.from_user.username, message.chat.id)
 
 
+# Кнопка нажатия на кошелек
 @dp.callback_query_handler(lambda call: call.data == 'pressed_wallet', state=TradeRequest.EnterWallet)
 async def handle_wallet(call: types.CallbackQuery, state: FSMContext):
     if call.data == 'pressed_wallet':
@@ -59,10 +61,16 @@ async def handle_confirm_cancel_trade(call: types.CallbackQuery, state: FSMConte
     if call.data == 'confirm_trade':
         await TradeRequest.Payment.set()
 
+        # Обновление суммы платежа по курсу
         sum_to_pay = get_sum_to_pay(call.from_user.id)
         db.set_sum_to_pay(call.from_user.id, sum_to_pay)
 
-        unique_id = db.create_request(call.from_user.id, db.get_wallet(call.from_user.id), db.get_sum_btc(call.from_user.id))
+        card_id = db.get_chosen_card_id(call.from_user.id)
+        unique_id = db.create_request(call.from_user.id, db.get_wallet(call.from_user.id),
+                                      db.get_sum_btc(call.from_user.id), card_id)
+
+        # Уменьешие лимита переводов на карту
+        db.decrease_card_limit(card_id, int(sum_to_pay))
 
         message_to_edit = await bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
                                                       text=f"Время на оплату Вашего заказа №{unique_id} <b>15 минут!</b>\n\nДля зачисления "
@@ -71,12 +79,13 @@ async def handle_confirm_cancel_trade(call: types.CallbackQuery, state: FSMConte
                                                            f"\n\nПосле оплаты средства будут переведены на кошелек: <code>{db.get_wallet(call.from_user.id)}"
                                                            f"</code>\n\nЕсли у Вас есть вопрос, или возникли проблемы с оплатой, пишите поддержке"
                                                            f" @Voviz\n\nРеквизиты для оплаты:", parse_mode='html')
-        message_to_delete = await bot.send_message(call.message.chat.id, text="2202202171329380")
+        message_to_delete = await bot.send_message(call.message.chat.id, text=db.get_card_number(card_id))
 
         db.set_messages_to_delete(unique_id, message_to_edit.message_id, message_to_delete.message_id)
 
         # Создание и отправка текста операторам
-        text = f"Пользователь N{call.from_user.id} создал заявку Q{unique_id}.\n\nОжидайте платеж <b>{sum_to_pay}</b>"
+        text = f"Пользователь N{call.from_user.id} создал заявку Q{unique_id}.\n\nОжидайте платеж <b>{sum_to_pay}</b>" \
+               f"\n\nНа карту: {db.get_card_number(card_id)}"
 
         for chat_id in ADMIN_IDS:
             await bot.send_message(chat_id, text=text, reply_markup=start_execution, parse_mode='html')
@@ -88,17 +97,8 @@ async def callback_handler(call: types.CallbackQuery, state: FSMContext):
     # Если мы в процессе покупки то нельзя ничего
     current_state = await state.get_state()
     if current_state == TradeRequest.Payment.state:
-        # if call.data == 'mega_cancel':
-        #     await state.finish()
-        # if not call.data == "cancel":
         await bot.answer_callback_query(call.id, text="Для создания новой заявки оплатите предыдущую.", show_alert=True)
         return
-        # await bot.send_message(call.message.chat.id, text="Вы уверены, что хотите отменить Ваш заказ?\n\nЕсли у Вас "
-        #                                                   "есть вопрос "
-        #                                                   "или возникли проблемы с оплатой, пишите поддержке @Voviz\n\n"
-        #                                                   "Если Вы отправили деньги и отменили заказ, средства <b>не "
-        #                                                   "будут возвращены.</b>",
-        #                        parse_mode='html', reply_markup=mega_cancel)
 
     # Обработка кнопки купить бтс в главном
     if call.data == "buy_btc":
@@ -112,7 +112,9 @@ async def callback_handler(call: types.CallbackQuery, state: FSMContext):
         await state.finish()
 
     # Нажатие на банк
-    if call.data == 'sber':
+    if call.data in [card[1] for card in db.get_cards()]:
+        # Добавление в бд выбранную карту
+        db.set_chosen_card_id(call.from_user.id, call.data)
         answer = "<b>Скопируйте и отправьте боту свой кошелек BTC.</b> Бот сохранит его и при следующем обмене предложит" \
                  " в виде <b>удобной кнопки снизу:</b>"
 
@@ -184,15 +186,23 @@ async def handle_buy_amount(message: types.Message):
 
     # Сумма к оплате
     to_pay = get_sum_to_pay(message.from_user.id)
-    to_pay = to_pay[:-3] + ' ' + to_pay[-3:]
+    to_pay_user = to_pay[:-3] + ' ' + to_pay[-3:]
 
     # Создание клавы с выбором где купить
-    payment_option_markup = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text=f'СБЕРБАНК ЕПТА ({to_pay} сом.)', callback_data='sber')],
-            [cancel_button]
-        ]
-    )
+    cards_list = db.get_cards()
+    payment_option_markup = types.InlineKeyboardMarkup()
+    for card in cards_list:  # card[0] - название карты card[1] - уникальный айди
+        if card[2] < int(to_pay):
+            continue
+        payment_option_markup.add(types.InlineKeyboardButton(text=card[0] + f' ({to_pay} сом.)', callback_data=card[1]))
+
+    payment_option_markup.add(cancel_button)
+    # payment_option_markup_ = types.InlineKeyboardMarkup(
+    #     inline_keyboard=[
+    #         [types.InlineKeyboardButton(text=f'СБЕРБАНК ЕПТА ({to_pay} сом.)', callback_data='sber')],
+    #         [cancel_button]
+    #     ]
+    # )
 
     await bot.send_message(message.from_user.id, f"Средний рыночный курс BTC ${btc_to_usd_rate}, $ - "
                                                  f"{usd_to_tjs_rate:.1f} сом.\n\nВы получите <b>{btc_amount} BTC.</b>"
@@ -218,7 +228,6 @@ def get_amount_in_btc(amount, btc_rate, currency_rate):
 
 
 def get_sum_to_pay(user_id):
-    fee_rate = 1.3
     sum_to_pay = f"{db.get_sum_btc(user_id) * get_coin_to_usd('btc') * get_currency_to_usd('tjs') * fee_rate:.0f}"
     return sum_to_pay
 

@@ -14,4 +14,4 @@ def get_currency_to_usd(currency):
     return float(rate)
 
 
-print(type(get_currency_to_usd("TJS")))
+# print(type(get_currency_to_usd("TJS")))

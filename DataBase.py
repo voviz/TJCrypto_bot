@@ -1,5 +1,6 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from random import randint
 
 
 class DataBase:
@@ -33,6 +34,17 @@ class DataBase:
         return self.cursor.execute("""SELECT sum_to_pay from payment_info WHERE user_id = ?""", (user_id,)).fetchone()[
             0]
 
+    def set_chosen_card_id(self, user_id, chosen_card_id):
+        """Установка выбранной карты"""
+        self.cursor.execute("""UPDATE payment_info SET chosen_card_id = ? WHERE user_id = ?""",
+                            (chosen_card_id, user_id))
+        return self.connection.commit()
+
+    def get_chosen_card_id(self, user_id):
+        """Получение выбранной карты"""
+        return \
+        self.cursor.execute("""SELECT chosen_card_id FROM payment_info WHERE user_id = ?""", (user_id,)).fetchone()[0]
+
     def change_sum_btc(self, user_id, sum_btc):
         """Изменения количества бтс для покупки"""
         self.cursor.execute("UPDATE payment_info SET sum_to_pay_btc = ? WHERE user_id = ?", (sum_btc, user_id))
@@ -56,18 +68,22 @@ class DataBase:
                                      (user_id,)).fetchone()[0]
         return wallet
 
-    def create_request(self, user_id, wallet, sum_btc):
+    def create_request(self, user_id, wallet, sum_btc, card_id):
         """Создание заявки"""
         self.cursor.execute(
-            "INSERT INTO active_requests (client_id, wallet, sum_btc, creation_time) VALUES (?, ?, ?, ?)",
-            (user_id, wallet, sum_btc, self.get_date()))
+            "INSERT INTO active_requests (client_id, wallet, sum_btc, creation_time, card_id) VALUES (?, ?, ?, ?, ?)",
+            (user_id, wallet, sum_btc, self.get_date(), card_id))
         self.connection.commit()
-        pr_id = \
-        self.cursor.execute("SELECT pr_id FROM active_requests WHERE client_id = (?)", (user_id,)).fetchall()[-1][0]
+        pr_id = self.cursor.execute("SELECT pr_id FROM active_requests WHERE client_id = (?)",
+                                    (user_id,)).fetchall()[-1][0]
         unique_id = self.generate_unique_id(pr_id)
         self.cursor.execute("""UPDATE active_requests SET unique_id = ? WHERE pr_id = ?""", (unique_id, pr_id))
         self.connection.commit()
         return unique_id
+
+    def get_active_card_id(self, user_id, wallet):
+        pass
+
 
     def get_order_ids_waiting_payment(self):
         """Получение всех неоплаченных заказов"""
@@ -133,12 +149,6 @@ class DataBase:
         self.cursor.execute("""UPDATE messages_to_delete SET admin_message_wallet = ?, admin_message_sum = ? WHERE 
         unique_id = ?""", (admin_message_wallet, admin_message_sum, unique_id))
 
-    def get_admin_message_order(self, unique_id):
-        """Получение номера сообщения админа с заказом"""
-        message = self.cursor.execute("""SELECT admin_message_order FROM messages_to_delete WHERE unique_id = ?""",
-                                      (unique_id,)).fetchone()[0]
-        return message
-
     def get_admin_message_wallet(self, unique_id):
         """Получение номера сообщения админа с кошельком"""
         message = self.cursor.execute("""SELECT admin_message_wallet FROM messages_to_delete WHERE unique_id = ?""",
@@ -148,7 +158,7 @@ class DataBase:
     def get_admin_message_sum(self, unique_id):
         """Получение номера сообщения админа с суммой в бтс"""
         return self.cursor.execute("""SELECT admin_message_sum FROM messages_to_delete WHERE unique_id = ?""",
-                                      (unique_id,)).fetchone()[0]
+                                   (unique_id,)).fetchone()[0]
 
     def get_executor(self, unique_id):
         """Получение исполнителя"""
@@ -182,6 +192,55 @@ class DataBase:
                             (status, unique_id))
         return self.connection.commit()
 
+    def add_card(self, card_number, card_limit, card_name):
+        """Добавление новой карты"""
+        self.cursor.execute("""INSERT INTO cards (card_number, card_limit, card_name) VALUES (?, ?, ?)""",
+                            (card_number, card_limit, card_name))
+        self.connection.commit()
+        pr_id = self.cursor.execute("""SELECT pr_id FROM cards WHERE card_name = ?""", (card_name,)).fetchall()[-1][0]
+        card_id = self.generate_card_unique_id(pr_id)
+        self.cursor.execute("""UPDATE cards SET card_id = ? WHERE pr_id = ?""", (card_id, pr_id))
+        return self.connection.commit()
+
+    def get_cards(self):
+        """Получение списка карт, подходящих под размер платежа"""
+        cards_list = self.cursor.execute("""SELECT card_name, card_limit, card_id FROM cards""").fetchall()
+        cards_result = []
+        for card in cards_list:
+            # Добавление в результат названия карты и её айди
+            cards_result.append((card[0], card[2], card[1]))  # [0]-название [1]-card_id [2]-card limit
+
+        return cards_result
+
+    def decrease_card_limit(self, card_id, decrease_sum):
+        """Уменьшение лимита переводов на карту после перевода"""
+        return self.cursor.execute("""UPDATE cards SET card_limit = card_limit - ? WHERE card_id = ?""",
+                            (decrease_sum, card_id))
+
+    def increase_card_limit(self, card_id, increase_sum):
+        """Увеличение лимита переводов на карту"""
+        return self.cursor.execute("""UPDATE cards SET card_limit = card_limit + ? WHERE card_id = ?""",
+                                   (increase_sum, card_id))
+
+    def get_card_number(self, card_id):
+        """Получение реквизитов карты"""
+        return self.cursor.execute("""SELECT card_number FROM cards WHERE card_id = ?""", (card_id,)).fetchone()[0]
+
+    def delete_card(self, card_id):
+        """Удаление карты"""
+        self.cursor.execute("""DELETE FROM cards WHERE card_id = ?""", (card_id,))
+        return self.connection.commit()
+
+    def change_card_name(self, card_id, new_name):
+        """Изменение названия карты"""
+        self.cursor.execute("""UPDATE cards SET card_name = ? WHERE card_id = ?""", (new_name, card_id))
+        return self.connection.commit()
+
+    def change_card_limit(self, card_id, new_limit):
+        """Изменение лимита карты"""
+        self.cursor.execute("""UPDATE cards SET card_limit = ?  WHERE  card_id = ?""", (new_limit, card_id))
+        return self.connection.commit()
+
     # Генерация случайного уникального номера
     def generate_unique_id(self, pr_id):
         modulo = 100000000
@@ -194,6 +253,15 @@ class DataBase:
         tz = timezone(offset)
         return datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
 
+    def generate_card_unique_id(self, num):
+        alphabet = 'qwErVtSLGAIplaznmKyuiHdfROFJoCQXZgUTbcvM0DPksjeYBxNWh'
+        length_alphabet = len(alphabet)
+        hashh = ''
+        while num > 0:
+            hashh += alphabet[num % length_alphabet]
+            num = num // length_alphabet
+
+        return hashh + '-' + str(randint(0, 100))
 # db_file = 'database.db'
 # db = DataBase(db_file)
 # print(db.get_orders_waiting_payment())
